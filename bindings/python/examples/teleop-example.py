@@ -9,14 +9,27 @@ import numpy as np
 
 import pysurvive
 
+
+
+
+
+
 # --- ARX5 SDK hookup -------------------------------------------------
 SDK_ROOT = "/home/griffin/arx5-sdk"
 sys.path.append(f"{SDK_ROOT}/python")
 os.environ["LD_LIBRARY_PATH"] = f"{SDK_ROOT}/lib/x86_64:" + os.environ.get("LD_LIBRARY_PATH", "")
 
-import arx5_interface as arx5  # this is the pybind module
-from arx5_interface import Arx5CartesianController, EEFState          # convenience
+from arx5_interface import Arx5CartesianController, EEFState, RobotConfigFactory, ControllerConfigFactory
 # ---------------------------------------------------------------------
+
+
+
+
+
+
+
+
+
 
 
 def _copy_pose(dst, src):
@@ -145,8 +158,85 @@ def main():
     # --- init ARX5 controller (L5 on can0) ----------------------------  ### NEW
     model = "L5"
     interface = "can1"
-    controller = Arx5CartesianController(model, interface)
+    # controller = Arx5CartesianController(model, interface)
+
+# class RobotConfig:
+#     """Does not have a constructor, use RobotConfigFactory.get_instance().get_config(...) instead."""
+#
+#     robot_model: str
+#     joint_pos_min: np.ndarray
+#     joint_pos_max: np.ndarray
+#     joint_vel_max: np.ndarray
+#     joint_torque_max: np.ndarray
+#     ee_vel_max: np.ndarray
+#     gripper_vel_max: float
+#     gripper_torque_max: float
+#     gripper_width: float
+#     gripper_open_readout: float
+#     joint_dof: int
+#     motor_id: list[int]
+#     motor_type: list[MotorType]
+#     gripper_motor_id: int
+#     gripper_motor_type: MotorType
+#     gravity_vector: np.ndarray
+#     base_link_name: str
+#     eef_link_name: str
+#     urdf_path: str
+#
+# class ControllerConfig:
+#     """Does not have a constructor, use ControllerConfigFactory.get_instance().get_config(...) instead."""
+#
+#     controller_type: str
+#     default_kp: np.ndarray
+#     default_kd: np.ndarray
+#     default_gripper_kp: float
+#     default_gripper_kd: float
+#     over_current_cnt_max: int
+#     controller_dt: float
+#     gravity_compensation: bool
+#     background_send_recv: bool
+#     shutdown_to_passive: bool
+#     interpolation_method: str
+#     default_preview_time: float
+
+  # ctrl_cfg = ControllerConfigFactory.get_instance().get_config(
+  #     "cartesian_controller", robot_cfg.joint_dof
+  # )
+#
+
+  # - idx 0 → joint1: base yaw (revolute about Z, attaches base_link→link1; models/L5.urdf:58-64).
+  # - idx 1 → joint2: shoulder pitch (axis Y between link1 and link2; models/L5.urdf:92-98).
+  # - idx 2 → joint3: upper-arm pitch/elbow lift (axis Y between link2 and link3; models/L5.urdf:126-132).
+  # - idx 3 → joint4: forearm pitch (axis Y between link3 and link4; models/L5.urdf:160-166).
+  # - idx 4 → joint5: wrist yaw (axis Z between link4 and link5; models/L5.urdf:194-200).
+  # - idx 5 → joint6: wrist roll (axis X between link5 and link6; models/L5.urdf:224-230).
+
+    robot_cfg = RobotConfigFactory.get_instance().get_config("L5")
+    ## tweak joint torque max
+    # for i in range(robot_cfg.joint_dof):
+    #     robot_cfg.joint_torque_max[i] *= 0.1
+    jt_max = np.array(robot_cfg.joint_torque_max, copy=True)
+    # default jt max for L5 = [30, 40, 30, 15, 10, 10]
+    robot_cfg.joint_torque_max = jt_max
+    ## tweak joint vel max
+    jv_max = np.array(robot_cfg.joint_vel_max, copy=True)
+    # default gripper torque max = 1.5
+    print("Original joint vel max:", jv_max)
+    # default = jv_max = [5, 5, 5.5, 5.5, 5, 5]
+    jv_max = [2, 2, 2, 3, 3, 3]
+    # jv_max *= 0.3
+    # jv_max[0] *= 0.05
+    robot_cfg.joint_vel_max = jv_max
+
+    ctrl_cfg = ControllerConfigFactory.get_instance().get_config("cartesian_controller",
+    robot_cfg.joint_dof)
+    # ctrl_cfg.default_gripper_kp *= 0.5  # your tweak
+
+    controller = Arx5CartesianController(robot_cfg, ctrl_cfg, "can1")
+
+
     controller.reset_to_home()
+    
 
     # Keep current orientation, move EE to (0.243, 0.0, 0.317) over 2 s
     curr_pose = controller.get_eef_state().pose_6d().copy()
@@ -161,7 +251,7 @@ def main():
     eef_reference_pose = None  # will be set when A is pressed
     preview_time = 0.05        # seconds ahead of current time
     pos_scale = 1.0            # scale controller meters -> arm meters (tune)  ### NEW
-    gripper_min = 0.01
+    gripper_min = 0.0
     gripper_command = gripper_width
     gripper_hold = False
     torque_limit = 0.55
