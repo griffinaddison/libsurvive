@@ -6,18 +6,14 @@ import os
 
 import pysurvive
 
-
-
-# Hardcode SDK path
+# --- ARX5 SDK hookup -------------------------------------------------
 SDK_ROOT = "/home/griffin/arx5-sdk"
 sys.path.append(f"{SDK_ROOT}/python")
 os.environ["LD_LIBRARY_PATH"] = f"{SDK_ROOT}/lib/x86_64:" + os.environ.get("LD_LIBRARY_PATH", "")
 
 import arx5_interface as arx5
-
-# Test
-print("Loaded ARX5:", arx5)
-
+from arx5_interface import Arx5CartesianController, EEFState
+# ---------------------------------------------------------------------
 
 
 def _copy_pose(dst, src):
@@ -62,7 +58,7 @@ def _quat_multiply(q1, q2):
     w1, x1, y1, z1 = q1
     w2, x2, y2, z2 = q2
     return (
-        w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+        w1 * w2 - x1 * x2 - y1 * y1 - z1 * z2,
         w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
         w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
         w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
@@ -107,16 +103,8 @@ def _pose_from_event(event_pose):
     return pose
 
 
-def _format_pose(pose):
-    pos = [pose.Pos[i] for i in range(3)]
-    rot = [pose.Rot[i] for i in range(4)]
-    return (
-        f"{pos[0]:6.2f} {pos[1]:6.2f} {pos[2]:6.2f}",
-        f"{rot[0]:6.2f} {rot[1]:6.2f} {rot[2]:6.2f} {rot[3]:6.2f}",
-    )
-
-
 def main():
+    # --- init libsurvive ----------------------------------------------
     ctx = pysurvive.SimpleContext(sys.argv)
     if not ctx.ptr:
         print("Failed to initialize libsurvive context", file=sys.stderr)
@@ -124,6 +112,21 @@ def main():
 
     for obj in ctx.Objects():
         print(obj.Name().decode("utf-8"))
+
+    # --- init ARX5 (L5 on can0) ---------------------------------------
+    model = "L5"
+    interface = "can1"
+    controller = Arx5CartesianController(model, interface)
+    controller.reset_to_home()
+    robot_config = controller.get_robot_config()
+    gripper_width = robot_config.gripper_width
+
+    # keep EE pose fixed at reference, only change gripper_pos
+    eef_reference_pose = controller.get_home_pose().copy()
+    gripper_reference = 0.0
+    preview_time = 0.05  # s in the future
+    gripper_scale = -2.0  # meters of controller z → fraction of full width
+    # -------------------------------------------------------------------
 
     right_engaged = False
     have_reference = False
@@ -146,7 +149,9 @@ def main():
     event = pysurvive.SurviveSimpleEvent()
     try:
         while keep_running:
-            event_type = pysurvive.survive_simple_wait_for_event(ctx.ptr, ctypes.byref(event))
+            event_type = pysurvive.survive_simple_wait_for_event(
+                ctx.ptr, ctypes.byref(event)
+            )
             if event_type == pysurvive.SurviveSimpleEventType_Shutdown:
                 break
             if event_type == pysurvive.SurviveSimpleEventType_None:
@@ -155,7 +160,9 @@ def main():
             if event_type == pysurvive.SurviveSimpleEventType_PoseUpdateEvent:
                 if not right_engaged:
                     continue
-                pose_event = pysurvive.survive_simple_get_pose_updated_event(ctypes.byref(event))
+                pose_event = pysurvive.survive_simple_get_pose_updated_event(
+                    ctypes.byref(event)
+                )
                 if not pose_event or not pose_event.contents.object:
                     continue
                 obj = pose_event.contents.object
@@ -165,16 +172,36 @@ def main():
 
                 pose = _pose_from_event(pose_event.contents.pose)
                 if have_reference:
+                    # Δpose in controller frame
                     pose = _apply_pose(right_reference_pose_inv, pose)
-                name = pysurvive.survive_simple_object_name(obj).decode("utf-8")
-                serial = pysurvive.survive_simple_serial_number(obj).decode("utf-8")
-                pos_str, rot_str = _format_pose(pose)
-                print(f"{name} {serial} ({pose_event.contents.time:7.3f}):")
-                print(f"  {pos_str}")
-                print(f"  {rot_str}")
+
+                    # use only Δz to drive gripper
+                    dz = pose.Pos[2]  # meters in controller frame
+                    # positive dz → open, negative → close
+                    target_gripper = gripper_reference + gripper_scale * dz * gripper_width
+
+                    # clamp
+                    if target_gripper < 0.0:
+                        target_gripper = 0.0
+                    elif target_gripper > gripper_width:
+                        target_gripper = gripper_width
+
+                    # build command: fixed pose, varying gripper
+                    eef_cmd = EEFState()
+                    eef_cmd.pose_6d()[:] = eef_reference_pose
+                    eef_cmd.gripper_pos = target_gripper
+                    eef_cmd.timestamp = controller.get_timestamp() + preview_time
+                    # print
+                    print(
+                        f"Setting gripper to {target_gripper:.4f} m (dz={dz:.4f} m)"
+                    )
+
+                    controller.set_eef_cmd(eef_cmd)
 
             elif event_type == pysurvive.SurviveSimpleEventType_ButtonEvent:
-                button_event = pysurvive.survive_simple_get_button_event(ctypes.byref(event))
+                button_event = pysurvive.survive_simple_get_button_event(
+                    ctypes.byref(event)
+                )
                 if not button_event or not button_event.contents.object:
                     continue
                 obj = button_event.contents.object
@@ -183,7 +210,10 @@ def main():
                     continue
 
                 if button_event.contents.button_id == pysurvive.SURVIVE_BUTTON_A:
-                    if button_event.contents.event_type == pysurvive.SURVIVE_INPUT_EVENT_BUTTON_DOWN:
+                    if (
+                        button_event.contents.event_type
+                        == pysurvive.SURVIVE_INPUT_EVENT_BUTTON_DOWN
+                    ):
                         right_engaged = True
                         pysurvive.survive_simple_object_get_latest_pose(
                             obj, ctypes.byref(right_reference_pose)
@@ -191,8 +221,18 @@ def main():
                         inv = _invert_pose(right_reference_pose)
                         _copy_pose(right_reference_pose_inv, inv)
                         have_reference = True
-                        print("Right A button engaged")
-                    elif button_event.contents.event_type == pysurvive.SURVIVE_INPUT_EVENT_BUTTON_UP:
+
+                        # snapshot EE pose + current gripper pos
+                        eef_state = controller.get_eef_state()
+                        eef_reference_pose = eef_state.pose_6d().copy()
+                        gripper_reference = eef_state.gripper_pos
+
+                        print("Right A button engaged (z controls gripper)")
+
+                    elif (
+                        button_event.contents.event_type
+                        == pysurvive.SURVIVE_INPUT_EVENT_BUTTON_UP
+                    ):
                         right_engaged = False
                         have_reference = False
                         _set_identity(right_reference_pose)
@@ -200,14 +240,25 @@ def main():
                         print("Right A button released")
 
             elif event_type == pysurvive.SurviveSimpleEventType_DeviceAdded:
-                obj_event = pysurvive.survive_simple_get_object_event(ctypes.byref(event))
+                obj_event = pysurvive.survive_simple_get_object_event(
+                    ctypes.byref(event)
+                )
                 if obj_event and obj_event.contents.object:
-                    name = pysurvive.survive_simple_object_name(obj_event.contents.object).decode("utf-8")
+                    name = (
+                        pysurvive.survive_simple_object_name(
+                            obj_event.contents.object
+                        ).decode("utf-8")
+                    )
                     print(f"({obj_event.contents.time:.3f}) Found '{name}'")
     finally:
         print("Cleaning up")
         pysurvive.survive_simple_close(ctx.ptr)
+        try:
+            controller.set_to_damping()
+        except Exception as e:
+            print(f"Error setting damping: {e}")
 
 
 if __name__ == "__main__":
     main()
+
