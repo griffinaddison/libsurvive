@@ -195,7 +195,7 @@ add_subdirectory(redist)
 add_subdirectory(src)
 add_subdirectory(tools)
 
-SET(SURVIVE_EXECUTABLES survive-cli api_example sensors-readout survive-solver survive-buttons)
+SET(SURVIVE_EXECUTABLES survive-cli api_example teleop_example sensors-readout survive-solver survive-buttons)
 foreach(executable ${SURVIVE_EXECUTABLES})
   VERBOSE_OPTION(ENABLE_${executable} "Build ${executable}" ${BUILD_APPLICATIONS})
 
