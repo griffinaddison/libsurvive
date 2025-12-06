@@ -1,0 +1,11 @@
+Defaulting to user installation because normal site-packages is not writeable
+Collecting scikit-build
+  Using cached scikit_build-0.18.1-py3-none-any.whl.metadata (18 kB)
+Requirement already satisfied: distro in /usr/lib/python3/dist-packages (from scikit-build) (1.7.0)
+Requirement already satisfied: packaging in /home/griffin/.local/lib/python3.10/site-packages (from scikit-build) (25.0)
+Requirement already satisfied: setuptools>=42.0.0 in /usr/lib/python3/dist-packages (from scikit-build) (59.6.0)
+Requirement already satisfied: tomli in /home/griffin/.local/lib/python3.10/site-packages (from scikit-build) (2.3.0)
+Requirement already satisfied: wheel>=0.32.0 in /usr/lib/python3/dist-packages (from scikit-build) (0.37.1)
+Using cached scikit_build-0.18.1-py3-none-any.whl (85 kB)
+Installing collected packages: scikit-build
+Successfully installed scikit-build-0.18.1
