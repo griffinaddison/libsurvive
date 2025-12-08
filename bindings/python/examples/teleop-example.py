@@ -214,7 +214,8 @@ def main():
         arm_states[subtype] = ArmTeleopState(name, controller)
 
     preview_time = 0.05        # seconds ahead of current time
-    pos_scale = 1.0            # scale controller meters -> arm meters (tune)  ### NEW
+    pos_scale = 1.25           # scale controller meters -> arm meters (tune)  ### NEW
+    rot_scale = 1.25
     torque_limit = 0.55
     # -------------------------------------------------------------------
 
@@ -278,9 +279,9 @@ def main():
                         hand_state.target_pose_6d[1] += -pos_scale * dx
                         hand_state.target_pose_6d[2] += -pos_scale * dz
                         roll, pitch, yaw = _quat_to_euler(pose.Rot)
-                        hand_state.target_pose_6d[3] = hand_state.eef_reference_pose[3] - pitch
-                        hand_state.target_pose_6d[4] = hand_state.eef_reference_pose[4] - roll #intuitive pitch
-                        hand_state.target_pose_6d[5] = hand_state.eef_reference_pose[5] - yaw
+                        hand_state.target_pose_6d[3] = hand_state.eef_reference_pose[3] - rot_scale * pitch
+                        hand_state.target_pose_6d[4] = hand_state.eef_reference_pose[4] - rot_scale * roll #intuitive pitch
+                        hand_state.target_pose_6d[5] = hand_state.eef_reference_pose[5] - rot_scale * yaw
 
                         eef_cmd = EEFState()
                         eef_cmd.pose_6d()[:] = hand_state.target_pose_6d
