@@ -145,6 +145,49 @@ def _format_pose(pose):
     )
 
 
+class ArmTeleopState:
+    def __init__(self, name, controller):
+        self.name = name
+        self.controller = controller
+        self.engaged = False
+        self.have_reference = False
+        self.reference_pose = pysurvive.SurvivePose()
+        self.reference_pose_inv = pysurvive.SurvivePose()
+        _set_identity(self.reference_pose)
+        _set_identity(self.reference_pose_inv)
+        self.eef_reference_pose = None
+        self.target_pose_6d = controller.get_home_pose().copy()
+        robot_config = controller.get_robot_config()
+        self.gripper_width = robot_config.gripper_width
+        self.gripper_min = 0.0
+        self.gripper_command = self.gripper_width
+        self.gripper_hold = False
+
+
+def _create_controller(label):
+    robot_cfg = RobotConfigFactory.get_instance().get_config("L5")
+    jt_max = np.array(robot_cfg.joint_torque_max, copy=True)
+    robot_cfg.joint_torque_max = jt_max
+    jv_max = np.array(robot_cfg.joint_vel_max, copy=True)
+    print(f"[{label}] Original joint vel max:", jv_max)
+    jv_max = [2, 2, 2, 3, 3, 3]
+    robot_cfg.joint_vel_max = jv_max
+    ctrl_cfg = ControllerConfigFactory.get_instance().get_config(
+        "cartesian_controller", robot_cfg.joint_dof
+    )
+    return robot_cfg, ctrl_cfg
+
+
+def _initialize_controller_state(controller):
+    controller.reset_to_home()
+    curr_pose = controller.get_eef_state().pose_6d().copy()
+    curr_pose[:3] = np.array([0.243, 0.0, 0.317])
+    robot_config = controller.get_robot_config()
+    target = EEFState(curr_pose, robot_config.gripper_width)
+    target.timestamp = controller.get_timestamp() + 2.0
+    controller.set_eef_cmd(target)
+
+
 def main():
     # --- init libsurvive context --------------------------------------
     ctx = pysurvive.SimpleContext(sys.argv)
@@ -155,114 +198,25 @@ def main():
     for obj in ctx.Objects():
         print(obj.Name().decode("utf-8"))
 
-    # --- init ARX5 controller (L5 on can0) ----------------------------  ### NEW
-    model = "L5"
-    interface = "can1"
-    # controller = Arx5CartesianController(model, interface)
+    # --- init ARX5 controllers ---------------------------------------
+    interfaces = {
+        pysurvive.SURVIVE_OBJECT_SUBTYPE_KNUCKLES_L: ("left", "can0"),
+        pysurvive.SURVIVE_OBJECT_SUBTYPE_KNUCKLES_R: ("right", "can1"),
+    }
 
-# class RobotConfig:
-#     """Does not have a constructor, use RobotConfigFactory.get_instance().get_config(...) instead."""
-#
-#     robot_model: str
-#     joint_pos_min: np.ndarray
-#     joint_pos_max: np.ndarray
-#     joint_vel_max: np.ndarray
-#     joint_torque_max: np.ndarray
-#     ee_vel_max: np.ndarray
-#     gripper_vel_max: float
-#     gripper_torque_max: float
-#     gripper_width: float
-#     gripper_open_readout: float
-#     joint_dof: int
-#     motor_id: list[int]
-#     motor_type: list[MotorType]
-#     gripper_motor_id: int
-#     gripper_motor_type: MotorType
-#     gravity_vector: np.ndarray
-#     base_link_name: str
-#     eef_link_name: str
-#     urdf_path: str
-#
-# class ControllerConfig:
-#     """Does not have a constructor, use ControllerConfigFactory.get_instance().get_config(...) instead."""
-#
-#     controller_type: str
-#     default_kp: np.ndarray
-#     default_kd: np.ndarray
-#     default_gripper_kp: float
-#     default_gripper_kd: float
-#     over_current_cnt_max: int
-#     controller_dt: float
-#     gravity_compensation: bool
-#     background_send_recv: bool
-#     shutdown_to_passive: bool
-#     interpolation_method: str
-#     default_preview_time: float
+    arm_states = {}
+    controllers = {}
+    for subtype, (name, interface) in interfaces.items():
+        robot_cfg, ctrl_cfg = _create_controller(name)
+        controller = Arx5CartesianController(robot_cfg, ctrl_cfg, interface)
+        _initialize_controller_state(controller)
+        controllers[subtype] = controller
+        arm_states[subtype] = ArmTeleopState(name, controller)
 
-  # ctrl_cfg = ControllerConfigFactory.get_instance().get_config(
-  #     "cartesian_controller", robot_cfg.joint_dof
-  # )
-#
-
-  # - idx 0 → joint1: base yaw (revolute about Z, attaches base_link→link1; models/L5.urdf:58-64).
-  # - idx 1 → joint2: shoulder pitch (axis Y between link1 and link2; models/L5.urdf:92-98).
-  # - idx 2 → joint3: upper-arm pitch/elbow lift (axis Y between link2 and link3; models/L5.urdf:126-132).
-  # - idx 3 → joint4: forearm pitch (axis Y between link3 and link4; models/L5.urdf:160-166).
-  # - idx 4 → joint5: wrist yaw (axis Z between link4 and link5; models/L5.urdf:194-200).
-  # - idx 5 → joint6: wrist roll (axis X between link5 and link6; models/L5.urdf:224-230).
-
-    robot_cfg = RobotConfigFactory.get_instance().get_config("L5")
-    ## tweak joint torque max
-    # for i in range(robot_cfg.joint_dof):
-    #     robot_cfg.joint_torque_max[i] *= 0.1
-    jt_max = np.array(robot_cfg.joint_torque_max, copy=True)
-    # default jt max for L5 = [30, 40, 30, 15, 10, 10]
-    robot_cfg.joint_torque_max = jt_max
-    ## tweak joint vel max
-    jv_max = np.array(robot_cfg.joint_vel_max, copy=True)
-    # default gripper torque max = 1.5
-    print("Original joint vel max:", jv_max)
-    # default = jv_max = [5, 5, 5.5, 5.5, 5, 5]
-    jv_max = [2, 2, 2, 3, 3, 3]
-    # jv_max *= 0.3
-    # jv_max[0] *= 0.05
-    robot_cfg.joint_vel_max = jv_max
-
-    ctrl_cfg = ControllerConfigFactory.get_instance().get_config("cartesian_controller",
-    robot_cfg.joint_dof)
-    # ctrl_cfg.default_gripper_kp *= 0.5  # your tweak
-
-    controller = Arx5CartesianController(robot_cfg, ctrl_cfg, "can1")
-
-
-    controller.reset_to_home()
-    
-
-    # Keep current orientation, move EE to (0.243, 0.0, 0.317) over 2 s
-    curr_pose = controller.get_eef_state().pose_6d().copy()
-    curr_pose[:3] = np.array([0.243, 0.0, 0.317])
-    robot_config = controller.get_robot_config()
-    gripper_width = robot_config.gripper_width
-    target = EEFState(curr_pose, gripper_width)
-    target.timestamp = controller.get_timestamp() + 2.0
-    controller.set_eef_cmd(target)
-
-    target_pose_6d = controller.get_home_pose().copy()
-    eef_reference_pose = None  # will be set when A is pressed
     preview_time = 0.05        # seconds ahead of current time
     pos_scale = 1.0            # scale controller meters -> arm meters (tune)  ### NEW
-    gripper_min = 0.0
-    gripper_command = gripper_width
-    gripper_hold = False
     torque_limit = 0.55
     # -------------------------------------------------------------------
-
-    right_engaged = False
-    have_reference = False
-    right_reference_pose = pysurvive.SurvivePose()
-    right_reference_pose_inv = pysurvive.SurvivePose()
-    _set_identity(right_reference_pose)
-    _set_identity(right_reference_pose_inv)
 
     keep_running = True
 
@@ -285,52 +239,54 @@ def main():
                 continue
 
             if event_type == pysurvive.SurviveSimpleEventType_PoseUpdateEvent:
-                if not right_engaged:
-                    continue
                 pose_event = pysurvive.survive_simple_get_pose_updated_event(ctypes.byref(event))
                 if not pose_event or not pose_event.contents.object:
                     continue
                 obj = pose_event.contents.object
                 subtype = pysurvive.survive_simple_object_get_subtype(obj)
-                if subtype != pysurvive.SURVIVE_OBJECT_SUBTYPE_KNUCKLES_R:
+                hand_state = arm_states.get(subtype)
+                if not hand_state or not hand_state.engaged:
                     continue
 
                 pose = _pose_from_event(pose_event.contents.pose)
-                if have_reference:
+                if hand_state.have_reference:
                     # pose is now "delta" in controller frame
-                    pose = _apply_pose(right_reference_pose_inv, pose)
+                    pose = _apply_pose(hand_state.reference_pose_inv, pose)
 
                     # --- NEW: use delta pose to command ARX5 -----------------
-                    if eef_reference_pose is not None:
+                    if hand_state.eef_reference_pose is not None:
+                        controller = hand_state.controller
                         joint_state = controller.get_joint_state()
-                        if not gripper_hold and abs(joint_state.gripper_torque) > torque_limit:
-                            gripper_command = max(
-                                gripper_min, min(gripper_width, joint_state.gripper_pos)
+                        if (
+                            not hand_state.gripper_hold
+                            and abs(joint_state.gripper_torque) > torque_limit
+                        ):
+                            hand_state.gripper_command = max(
+                                hand_state.gripper_min,
+                                min(hand_state.gripper_width, joint_state.gripper_pos),
                             )
-                            gripper_hold = True
+                            hand_state.gripper_hold = True
                             print(
-                                f"Gripper torque {joint_state.gripper_torque:.3f} Nm exceeding limit; holding at {gripper_command:.4f} m"
+                                f"{hand_state.name.capitalize()} gripper torque {joint_state.gripper_torque:.3f} Nm exceeding limit; holding at {hand_state.gripper_command:.4f} m"
                             )
 
                         # simple position-only mapping L5-frame ~= world-frame
                         dx, dy, dz = pose.Pos[0], pose.Pos[1], pose.Pos[2]
 
-                        target_pose_6d[:] = eef_reference_pose  # start from ref EE pose
-                        # target_pose_6d[0] += pos_scale * dx
-                        # target_pose_6d[1] += pos_scale * dy
-                        target_pose_6d[0] += -pos_scale * dy
-                        target_pose_6d[1] += -pos_scale * dx
-                        target_pose_6d[2] += -pos_scale * dz
+                        hand_state.target_pose_6d[:] = hand_state.eef_reference_pose
+                        hand_state.target_pose_6d[0] += -pos_scale * dy
+                        hand_state.target_pose_6d[1] += -pos_scale * dx
+                        hand_state.target_pose_6d[2] += -pos_scale * dz
                         roll, pitch, yaw = _quat_to_euler(pose.Rot)
-                        target_pose_6d[3] = eef_reference_pose[3] - pitch
-                        target_pose_6d[4] = eef_reference_pose[4] - roll #intuitive pitch
-                        target_pose_6d[5] = eef_reference_pose[5] - yaw
+                        hand_state.target_pose_6d[3] = hand_state.eef_reference_pose[3] - pitch
+                        hand_state.target_pose_6d[4] = hand_state.eef_reference_pose[4] - roll #intuitive pitch
+                        hand_state.target_pose_6d[5] = hand_state.eef_reference_pose[5] - yaw
 
                         eef_cmd = EEFState()
-                        eef_cmd.pose_6d()[:] = target_pose_6d
-                        eef_cmd.gripper_pos = gripper_command
+                        eef_cmd.pose_6d()[:] = hand_state.target_pose_6d
+                        eef_cmd.gripper_pos = hand_state.gripper_command
                         eef_cmd.timestamp = controller.get_timestamp() + preview_time
-                        controller.set_eef_cmd(eef_cmd)
+                        hand_state.controller.set_eef_cmd(eef_cmd)
                     # ---------------------------------------------------------
 
                 # still handy to print for debugging if you want
@@ -347,7 +303,8 @@ def main():
                     continue
                 obj = button_event.contents.object
                 subtype = pysurvive.survive_simple_object_get_subtype(obj)
-                if subtype != pysurvive.SURVIVE_OBJECT_SUBTYPE_KNUCKLES_R:
+                hand_state = arm_states.get(subtype)
+                if not hand_state:
                     continue
 
                 for i in range(button_event.contents.axis_count):
@@ -355,34 +312,34 @@ def main():
                     if axis_id == pysurvive.SURVIVE_AXIS_TRIGGER:
                         trigger_val = button_event.contents.axis_val[i]
                         trigger_val = max(0.0, min(1.0, trigger_val))
-                        gripper_command = gripper_width * (1.0 - trigger_val)
-                        if gripper_command < gripper_min:
-                            gripper_command = gripper_min
-                        gripper_hold = False
+                        hand_state.gripper_command = hand_state.gripper_width * (1.0 - trigger_val)
+                        if hand_state.gripper_command < hand_state.gripper_min:
+                            hand_state.gripper_command = hand_state.gripper_min
+                        hand_state.gripper_hold = False
 
                 if button_event.contents.button_id == pysurvive.SURVIVE_BUTTON_A:
                     if button_event.contents.event_type == pysurvive.SURVIVE_INPUT_EVENT_BUTTON_DOWN:
-                        right_engaged = True
+                        hand_state.engaged = True
                         pysurvive.survive_simple_object_get_latest_pose(
-                            obj, ctypes.byref(right_reference_pose)
+                            obj, ctypes.byref(hand_state.reference_pose)
                         )
-                        inv = _invert_pose(right_reference_pose)
-                        _copy_pose(right_reference_pose_inv, inv)
-                        have_reference = True
+                        inv = _invert_pose(hand_state.reference_pose)
+                        _copy_pose(hand_state.reference_pose_inv, inv)
+                        hand_state.have_reference = True
 
                         # snapshot current EE pose as reference                  ### NEW
-                        eef_state = controller.get_eef_state()
-                        eef_reference_pose = eef_state.pose_6d().copy()
-                        print("Right A button engaged")
+                        eef_state = hand_state.controller.get_eef_state()
+                        hand_state.eef_reference_pose = eef_state.pose_6d().copy()
+                        print(f"{hand_state.name.capitalize()} A button engaged")
 
                     elif button_event.contents.event_type == pysurvive.SURVIVE_INPUT_EVENT_BUTTON_UP:
-                        right_engaged = False
-                        have_reference = False
-                        eef_reference_pose = None     # forget ref on release   ### NEW
-                        gripper_hold = False
-                        _set_identity(right_reference_pose)
-                        _set_identity(right_reference_pose_inv)
-                        print("Right A button released")
+                        hand_state.engaged = False
+                        hand_state.have_reference = False
+                        hand_state.eef_reference_pose = None     # forget ref on release   ### NEW
+                        hand_state.gripper_hold = False
+                        _set_identity(hand_state.reference_pose)
+                        _set_identity(hand_state.reference_pose_inv)
+                        print(f"{hand_state.name.capitalize()} A button released")
 
             elif event_type == pysurvive.SurviveSimpleEventType_DeviceAdded:
                 obj_event = pysurvive.survive_simple_get_object_event(ctypes.byref(event))
@@ -392,10 +349,11 @@ def main():
     finally:
         print("Cleaning up")
         pysurvive.survive_simple_close(ctx.ptr)
-        try:
-            controller.set_to_damping()
-        except Exception as e:
-            print(f"Error setting damping: {e}")
+        for controller in controllers.values():
+            try:
+                controller.set_to_damping()
+            except Exception as e:
+                print(f"Error setting damping: {e}")
 
 
 if __name__ == "__main__":
