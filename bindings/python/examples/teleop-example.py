@@ -418,6 +418,10 @@ def main():
                         _set_identity(hand_state.reference_pose)
                         _set_identity(hand_state.reference_pose_inv)
                         print(f"{hand_state.name.capitalize()} A button released")
+                elif button_event.contents.button_id == pysurvive.SURVIVE_BUTTON_B:
+                    if button_event.contents.event_type == pysurvive.SURVIVE_INPUT_EVENT_BUTTON_DOWN:
+                        print(f"{hand_state.name.capitalize()} B button pressed — initiating shutdown")
+                        stop_handler(signal.SIGINT, None)
 
             elif event_type == pysurvive.SurviveSimpleEventType_DeviceAdded:
                 obj_event = pysurvive.survive_simple_get_object_event(ctypes.byref(event))
