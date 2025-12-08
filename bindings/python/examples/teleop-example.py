@@ -229,7 +229,7 @@ def main():
     workspace_limit = 0.7    # +/- 70 cm relative to captured pose
     max_translation_step = 0.08  # limit per-update delta to 5 cm
     rot_scale = 1.25
-    torque_limit = 0.55
+    torque_limit = 0.80
     # -------------------------------------------------------------------
 
     keep_running = True
