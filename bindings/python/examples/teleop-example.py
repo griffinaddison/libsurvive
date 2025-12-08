@@ -162,6 +162,11 @@ class ArmTeleopState:
         self.gripper_min = 0.0
         self.gripper_command = self.gripper_width
         self.gripper_hold = False
+        self.last_command_pose = controller.get_eef_state().pose_6d().copy()
+        self.joint_torque_limit = np.array(robot_config.joint_torque_max) * 0.5
+        self.torque_limited = False
+        self.workspace_clamped = False
+        self.velocity_limited = False
 
 
 def _create_controller(label):
@@ -170,7 +175,7 @@ def _create_controller(label):
     robot_cfg.joint_torque_max = jt_max
     jv_max = np.array(robot_cfg.joint_vel_max, copy=True)
     print(f"[{label}] Original joint vel max:", jv_max)
-    jv_max = [2, 2, 2, 3, 3, 3]
+    jv_max = [3, 3, 3, 4, 4, 4]
     robot_cfg.joint_vel_max = jv_max
     ctrl_cfg = ControllerConfigFactory.get_instance().get_config(
         "cartesian_controller", robot_cfg.joint_dof
@@ -212,9 +217,17 @@ def main():
         _initialize_controller_state(controller)
         controllers[subtype] = controller
         arm_states[subtype] = ArmTeleopState(name, controller)
+        gain = controller.get_gain()
+        print(
+            f"{name.capitalize()} initial gains:\n"
+            f"  kp: {np.array2string(gain.kp(), precision=4)}\n"
+            f"  kd: {np.array2string(gain.kd(), precision=4)}"
+        )
 
     preview_time = 0.05        # seconds ahead of current time
     pos_scale = 1.25           # scale controller meters -> arm meters (tune)  ### NEW
+    workspace_limit = 0.7    # +/- 70 cm relative to captured pose
+    max_translation_step = 0.08  # limit per-update delta to 5 cm
     rot_scale = 1.25
     torque_limit = 0.55
     # -------------------------------------------------------------------
@@ -258,6 +271,24 @@ def main():
                     if hand_state.eef_reference_pose is not None:
                         controller = hand_state.controller
                         joint_state = controller.get_joint_state()
+                        joint_torques = joint_state.torque().copy()
+                        abs_torque = np.abs(joint_torques)
+                        over_limit = abs_torque - hand_state.joint_torque_limit
+                        exceeding = np.where(over_limit > 0)[0]
+                        if exceeding.size > 0:
+                            idx = exceeding[np.argmax(over_limit[exceeding])]
+                            actual_val = abs_torque[idx]
+                            limit_val = hand_state.joint_torque_limit[idx]
+                            if not hand_state.torque_limited:
+                                print(
+                                    f"{hand_state.name.capitalize()} joint torque limit exceeded "
+                                    f"(joint {idx}: {actual_val:.4f} Nm > {limit_val:.4f} Nm); holding pose"
+                                )
+                                hand_state.torque_limited = True
+                            continue
+                        elif hand_state.torque_limited:
+                            print(f"{hand_state.name.capitalize()} torque back within limits; resuming motion")
+                            hand_state.torque_limited = False
                         if (
                             not hand_state.gripper_hold
                             and abs(joint_state.gripper_torque) > torque_limit
@@ -278,6 +309,47 @@ def main():
                         hand_state.target_pose_6d[0] += -pos_scale * dy
                         hand_state.target_pose_6d[1] += -pos_scale * dx
                         hand_state.target_pose_6d[2] += -pos_scale * dz
+                        workspace_clamped = False
+                        workspace_reason = ""
+                        for idx in range(3):
+                            min_bound = hand_state.eef_reference_pose[idx] - workspace_limit
+                            max_bound = hand_state.eef_reference_pose[idx] + workspace_limit
+                            clamped_val = max(
+                                min_bound, min(max_bound, hand_state.target_pose_6d[idx])
+                            )
+                            if clamped_val != hand_state.target_pose_6d[idx]:
+                                if not workspace_clamped:
+                                    requested_offset = hand_state.target_pose_6d[idx] - hand_state.eef_reference_pose[idx]
+                                    workspace_reason = (
+                                        f"axis {idx}: {requested_offset:+.4f} m exceeds ±{workspace_limit:.4f} m"
+                                    )
+                                workspace_clamped = True
+                                hand_state.target_pose_6d[idx] = clamped_val
+                        if workspace_clamped and not hand_state.workspace_clamped:
+                            print(f"{hand_state.name.capitalize()} workspace clamp active ({workspace_reason})")
+                        elif not workspace_clamped and hand_state.workspace_clamped:
+                            print(f"{hand_state.name.capitalize()} workspace clamp cleared")
+                        hand_state.workspace_clamped = workspace_clamped
+                        if hand_state.last_command_pose is not None:
+                            velocity_limited = False
+                            velocity_reason = ""
+                            for idx in range(3):
+                                prev = hand_state.last_command_pose[idx]
+                                delta = hand_state.target_pose_6d[idx] - prev
+                                if abs(delta) > max_translation_step:
+                                    hand_state.target_pose_6d[idx] = prev + math.copysign(
+                                        max_translation_step, delta
+                                    )
+                                    velocity_limited = True
+                                    if not velocity_reason:
+                                        velocity_reason = (
+                                            f"axis {idx}: step {abs(delta):.4f} m > {max_translation_step:.4f} m limit"
+                                        )
+                            if velocity_limited and not hand_state.velocity_limited:
+                                print(f"{hand_state.name.capitalize()} translation slew limit active ({velocity_reason})")
+                            elif not velocity_limited and hand_state.velocity_limited:
+                                print(f"{hand_state.name.capitalize()} translation slew limit cleared")
+                            hand_state.velocity_limited = velocity_limited
                         roll, pitch, yaw = _quat_to_euler(pose.Rot)
                         hand_state.target_pose_6d[3] = hand_state.eef_reference_pose[3] - rot_scale * pitch
                         hand_state.target_pose_6d[4] = hand_state.eef_reference_pose[4] - rot_scale * roll #intuitive pitch
@@ -288,6 +360,7 @@ def main():
                         eef_cmd.gripper_pos = hand_state.gripper_command
                         eef_cmd.timestamp = controller.get_timestamp() + preview_time
                         hand_state.controller.set_eef_cmd(eef_cmd)
+                        hand_state.last_command_pose = hand_state.target_pose_6d.copy()
                     # ---------------------------------------------------------
 
                 # still handy to print for debugging if you want
@@ -331,6 +404,8 @@ def main():
                         # snapshot current EE pose as reference                  ### NEW
                         eef_state = hand_state.controller.get_eef_state()
                         hand_state.eef_reference_pose = eef_state.pose_6d().copy()
+                        hand_state.last_command_pose = hand_state.eef_reference_pose.copy()
+                        hand_state.torque_limited = False
                         print(f"{hand_state.name.capitalize()} A button engaged")
 
                     elif button_event.contents.event_type == pysurvive.SURVIVE_INPUT_EVENT_BUTTON_UP:
@@ -338,6 +413,8 @@ def main():
                         hand_state.have_reference = False
                         hand_state.eef_reference_pose = None     # forget ref on release   ### NEW
                         hand_state.gripper_hold = False
+                        hand_state.last_command_pose = hand_state.controller.get_eef_state().pose_6d().copy()
+                        hand_state.torque_limited = False
                         _set_identity(hand_state.reference_pose)
                         _set_identity(hand_state.reference_pose_inv)
                         print(f"{hand_state.name.capitalize()} A button released")
@@ -350,11 +427,14 @@ def main():
     finally:
         print("Cleaning up")
         pysurvive.survive_simple_close(ctx.ptr)
-        for controller in controllers.values():
+        for subtype, controller in controllers.items():
+            hand_state = arm_states.get(subtype)
+            label = hand_state.name.capitalize() if hand_state else "Arm"
             try:
-                controller.set_to_damping()
+                print(f"{label}: returning to home pose")
+                controller.reset_to_home()
             except Exception as e:
-                print(f"Error setting damping: {e}")
+                print(f"Error during shutdown for {label}: {e}")
 
 
 if __name__ == "__main__":
