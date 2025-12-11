@@ -200,6 +200,8 @@ def run_teleop(ctx_args=None, status_callback=None, stop_event=None, install_sig
         ctx_args = sys.argv
     if stop_event is None:
         stop_event = threading.Event()
+    if "SURVIVE_LOG_LEVEL" not in os.environ:
+        os.environ["SURVIVE_LOG_LEVEL"] = "0"
     # --- init libsurvive context --------------------------------------
     ctx = pysurvive.SimpleContext(ctx_args)
     if not ctx.ptr:
