@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Teleop Textual UI
+Comment=Launches the ARX teleop Textual interface
+Exec=/home/griffin/libsurvive/tools/teleop_textual.sh
+Terminal=true
+Icon=utilities-terminal
+Categories=Utility;
