@@ -4,6 +4,7 @@ import math
 import signal
 import sys
 import os
+import threading
 
 import numpy as np
 
@@ -167,6 +168,7 @@ class ArmTeleopState:
         self.torque_limited = False
         self.workspace_clamped = False
         self.velocity_limited = False
+        self.device = None
 
 
 def _create_controller(label):
@@ -193,9 +195,13 @@ def _initialize_controller_state(controller):
     controller.set_eef_cmd(target)
 
 
-def main():
+def run_teleop(ctx_args=None, status_callback=None, stop_event=None, install_signal_handlers=True):
+    if ctx_args is None:
+        ctx_args = sys.argv
+    if stop_event is None:
+        stop_event = threading.Event()
     # --- init libsurvive context --------------------------------------
-    ctx = pysurvive.SimpleContext(sys.argv)
+    ctx = pysurvive.SimpleContext(ctx_args)
     if not ctx.ptr:
         print("Failed to initialize libsurvive context", file=sys.stderr)
         sys.exit(1)
@@ -232,21 +238,31 @@ def main():
     torque_limit = 0.80
     # -------------------------------------------------------------------
 
-    keep_running = True
+    def request_stop():
+        stop_event.set()
 
-    def stop_handler(signum, frame):
-        nonlocal keep_running
-        if not keep_running:
-            raise SystemExit(1)
-        keep_running = False
+    if install_signal_handlers and threading.current_thread() is threading.main_thread():
+        def stop_handler(signum, frame):
+            if stop_event.is_set():
+                raise SystemExit(1)
+            stop_event.set()
 
-    signal.signal(signal.SIGINT, stop_handler)
-    signal.signal(signal.SIGTERM, stop_handler)
+        signal.signal(signal.SIGINT, stop_handler)
+        signal.signal(signal.SIGTERM, stop_handler)
+
+    def publish_status():
+        if not status_callback:
+            return
+        for hand_state in arm_states.values():
+            pose = hand_state.controller.get_eef_state().pose_6d().copy()
+            status_callback(hand_state.name, pose)
 
     event = pysurvive.SurviveSimpleEvent()
     try:
-        while keep_running:
+        publish_status()
+        while not stop_event.is_set():
             event_type = pysurvive.survive_simple_wait_for_event(ctx.ptr, ctypes.byref(event))
+            publish_status()
             if event_type == pysurvive.SurviveSimpleEventType_Shutdown:
                 break
             if event_type == pysurvive.SurviveSimpleEventType_None:
@@ -261,6 +277,7 @@ def main():
                 hand_state = arm_states.get(subtype)
                 if not hand_state or not hand_state.engaged:
                     continue
+                hand_state.device = obj
 
                 pose = _pose_from_event(pose_event.contents.pose)
                 if hand_state.have_reference:
@@ -289,10 +306,8 @@ def main():
                         elif hand_state.torque_limited:
                             print(f"{hand_state.name.capitalize()} torque back within limits; resuming motion")
                             hand_state.torque_limited = False
-                        if (
-                            not hand_state.gripper_hold
-                            and abs(joint_state.gripper_torque) > torque_limit
-                        ):
+                        current_gripper_torque = abs(joint_state.gripper_torque)
+                        if current_gripper_torque > torque_limit:
                             hand_state.gripper_command = max(
                                 hand_state.gripper_min,
                                 min(hand_state.gripper_width, joint_state.gripper_pos),
@@ -301,6 +316,12 @@ def main():
                             print(
                                 f"{hand_state.name.capitalize()} gripper torque {joint_state.gripper_torque:.3f} Nm exceeding limit; holding at {hand_state.gripper_command:.4f} m"
                             )
+                        if hand_state.device:
+                            haptic_min = 0.1
+                            if current_gripper_torque > haptic_min:
+                                amplitude = (current_gripper_torque - haptic_min) / max(torque_limit - haptic_min, 1e-6)
+                                amplitude = max(0.0, min(1.0, amplitude))
+                                pysurvive.survive_simple_object_haptic(hand_state.device, 50.0, amplitude, 0.05)
 
                         # simple position-only mapping L5-frame ~= world-frame
                         dx, dy, dz = pose.Pos[0], pose.Pos[1], pose.Pos[2]
@@ -380,6 +401,7 @@ def main():
                 hand_state = arm_states.get(subtype)
                 if not hand_state:
                     continue
+                hand_state.device = obj
 
                 for i in range(button_event.contents.axis_count):
                     axis_id = button_event.contents.axis_ids[i]
@@ -421,7 +443,7 @@ def main():
                 elif button_event.contents.button_id == pysurvive.SURVIVE_BUTTON_B:
                     if button_event.contents.event_type == pysurvive.SURVIVE_INPUT_EVENT_BUTTON_DOWN:
                         print(f"{hand_state.name.capitalize()} B button pressed — initiating shutdown")
-                        stop_handler(signal.SIGINT, None)
+                        request_stop()
 
             elif event_type == pysurvive.SurviveSimpleEventType_DeviceAdded:
                 obj_event = pysurvive.survive_simple_get_object_event(ctypes.byref(event))
@@ -439,6 +461,10 @@ def main():
                 controller.reset_to_home()
             except Exception as e:
                 print(f"Error during shutdown for {label}: {e}")
+
+
+def main():
+    run_teleop()
 
 
 if __name__ == "__main__":
