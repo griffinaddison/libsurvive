@@ -836,9 +836,10 @@ def run_teleop(ctx_args=None, status_callback=None, stop_event=None, install_sig
                     arm.velocity_limited = velocity_limited
 
                 roll, pitch, yaw = _quat_to_euler(dquat)
-                arm.target_pose_6d[3] = arm.eef_reference_pose[3] - rot_scale * pitch
-                arm.target_pose_6d[4] = arm.eef_reference_pose[4] - rot_scale * roll
-                arm.target_pose_6d[5] = arm.eef_reference_pose[5] - rot_scale * yaw
+                # Pitch and yaw flipped (positive), roll keeps original (negative)
+                arm.target_pose_6d[3] = arm.eef_reference_pose[3] - rot_scale * pitch ## what i see as roll
+                arm.target_pose_6d[4] = arm.eef_reference_pose[4] + rot_scale * roll
+                arm.target_pose_6d[5] = arm.eef_reference_pose[5] + rot_scale * yaw
 
                 eef_cmd = EEFState()
                 eef_cmd.pose_6d()[:] = arm.target_pose_6d
