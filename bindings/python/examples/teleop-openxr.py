@@ -625,9 +625,9 @@ def run_teleop(ctx_args=None, status_callback=None, stop_event=None, install_sig
                 continue
 
             if display_time <= 0:
-                # For headless sessions without valid display time, use a minimal positive value
-                # This allows the frame loop to run even though we can't get proper timing
-                display_time = 1
+                # For headless sessions without valid display time, use current time in nanoseconds
+                # OpenXR times are in nanoseconds, so use time.time_ns() for minimal latency
+                display_time = time.time_ns()
 
             try:
                 xr.begin_frame(xr_ctx.session)
